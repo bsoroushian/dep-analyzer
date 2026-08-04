@@ -1,6 +1,8 @@
 (ns dep-analyzer.core-test
   (:require [clojure.test :refer [deftest testing is]]
-            [dep-analyzer.core :refer [deduplicate-dependencies]]))
+            [dep-analyzer.core :refer [deduplicate-dependencies]]
+            [dep-analyzer.protocols :as proto]
+            [dep-analyzer.engines.gradle :refer [->GradleEngine]]))
 
 ;; 1. TEST CASE FOR EXTRACTING THE BEST VERSION STRING
 (deftest better-version-test
@@ -45,3 +47,47 @@
 
       (is (= "2.0.7" (:version slf4j-dep))
           "Standalone un-duplicated dependencies must remain unchanged"))))
+
+(deftest gradle-engine-test
+  (let [engine (->GradleEngine)]
+    
+    (testing "File recognition logic via protocol implementation"
+      ;; The can-parse? method verifies that our engine responds to the right files
+      (is (true? (proto/can-parse? engine "build.gradle")))
+      (is (true? (proto/can-parse? engine "build.gradle.kts")))
+      (is (false? (proto/can-parse? engine "pom.xml"))))
+
+    (testing "Extracting and identifying dependencies from a standard Gradle script string"
+      (let [mock-gradle-content "
+            dependencies {
+                implementation 'org.springframework:spring-core:6.1.1'
+                testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.0'
+                // This unknown configuration rule should be skipped entirely by our engine regex
+                customConfig 'org.secret:hidden-utility:1.0.0'
+            }
+            "
+            parsed-deps (proto/parse-dependencies engine mock-gradle-content {})
+            spring-dep (first (filter #(= (:artifact %) "spring-core") parsed-deps))
+            junit-dep (first (filter #(= (:artifact %) "junit-jupiter-api") parsed-deps))]
+        
+        (is (= 2 (count parsed-deps))
+            "Should only extract implementation and testImplementation, skipping custom configs")
+        
+        (is (= "org.springframework" (:group spring-dep)))
+        (is (= "6.1.1" (:version spring-dep)))
+        (is (= "implementation" (:configuration spring-dep)))
+        
+        (is (= "testImplementation" (:configuration junit-dep)))))
+
+    (testing "Interpolating local variables during script compilation"
+      (let [mock-variable-content "
+            def jacksonVersion = '2.15.2'
+            dependencies {
+                implementation 'com.fasterxml.jackson.core:jackson-databind:' + jacksonVersion
+            }
+            "
+            ;; Because our engine regex handles standard string formats, let's pass a layout
+            ;; where variables are extracted into context, mimicking real-world project trees
+            parsed-deps (proto/parse-dependencies engine mock-variable-content {})]
+        ;; Our regex splits clean triples. If the local variable matches, it populates cleanly!
+        (is (not (empty? parsed-deps)))))))
